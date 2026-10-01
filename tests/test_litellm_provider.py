@@ -21,7 +21,7 @@ class _ContextWindowExceededError(Exception):
 @pytest.fixture
 def fake_litellm(monkeypatch):
     module = types.ModuleType("litellm")
-    module.provider_list = ["openai", "anthropic", "azure", "bedrock", "vertex_ai", "gemini", "litellm_proxy"]
+    module.provider_list = ["openai", "anthropic", "azure", "bedrock", "vertex_ai", "gemini"]
     module.acompletion = AsyncMock()
     module.exceptions = types.SimpleNamespace(ContextWindowExceededError=_ContextWindowExceededError)
     module.get_model_info = MagicMock(side_effect=Exception("unknown model"))
@@ -43,12 +43,7 @@ class TestModelRouting:
         assert provider._resolve_model("claude-sonnet-4-5") == "anthropic/claude-sonnet-4-5"
         assert provider._resolve_model("anthropic/claude-sonnet-4-5") == "anthropic/claude-sonnet-4-5"
 
-    def test_bare_proxy_alias_is_sent_through_the_proxy_route(self, fake_litellm):
-        provider = LiteLLMProvider(base_url="http://localhost:4000")
-        assert provider._resolve_model("claude-sonnet") == "litellm_proxy/claude-sonnet"
-        assert provider._resolve_model("litellm_proxy/claude-sonnet") == "litellm_proxy/claude-sonnet"
-
-    def test_explicit_route_keeps_base_url_as_api_base(self, fake_litellm):
+    def test_endpoint_routes_keep_their_route(self, fake_litellm):
         provider = LiteLLMProvider(base_url="https://my-azure.openai.azure.com", author="azure")
         assert provider._resolve_model("gpt-4o-deployment") == "azure/gpt-4o-deployment"
 
@@ -83,24 +78,25 @@ class TestChat:
         fake_litellm.acompletion.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_proxy_credentials_headers_and_tools(self, fake_litellm):
+    async def test_credentials_endpoint_headers_and_tools(self, fake_litellm):
         tool_call = MagicMock(id="call_1", model_extra=None)
         tool_call.function = MagicMock(arguments='{"ticker": "AAPL"}', model_extra=None)
         tool_call.function.name = "get_quote"
         fake_litellm.acompletion.return_value = _response(_message(None, [tool_call]))
         provider = LiteLLMProvider(
-            api_key="sk-virtual",
-            base_url="http://localhost:4000",
+            api_key="sk-azure",
+            base_url="https://my-resource.openai.azure.com",
+            author="azure",
             extra_headers={"X-Team": "quant"},
         )
         tools = [{"name": "get_quote", "description": "Quote", "parameters": {"type": "object", "properties": {}}}]
 
-        result = await provider.chat([], tools, model="claude-sonnet")
+        result = await provider.chat([], tools, model="gpt-4o-deployment")
 
         kwargs = fake_litellm.acompletion.call_args.kwargs
-        assert kwargs["model"] == "litellm_proxy/claude-sonnet"
-        assert kwargs["api_key"] == "sk-virtual"
-        assert kwargs["api_base"] == "http://localhost:4000"
+        assert kwargs["model"] == "azure/gpt-4o-deployment"
+        assert kwargs["api_key"] == "sk-azure"
+        assert kwargs["api_base"] == "https://my-resource.openai.azure.com"
         assert kwargs["extra_headers"] == {"X-Team": "quant"}
         assert kwargs["tools"] == [{"type": "function", "function": tools[0]}]
         assert [(call.id, call.name, call.arguments) for call in result.tool_calls] == [("call_1", "get_quote", {"ticker": "AAPL"})]
@@ -165,10 +161,10 @@ class TestConfigAndRuntime:
         assert (cfg.author, cfg.model) == ("bedrock", "us.anthropic.claude-sonnet-4-5")
         assert LiteLLMProvider.from_config(cfg)._resolve_model(cfg.model) == "bedrock/us.anthropic.claude-sonnet-4-5"
 
-    def test_proxy_alias_has_no_default_author(self, fake_litellm):
-        cfg = _provider_config("litellm", {"model": "claude-sonnet", "base_url": "http://localhost:4000"})
+    def test_unrouted_model_has_no_default_author(self, fake_litellm):
+        cfg = _provider_config("litellm", {"model": "gpt-4.1-mini"})
         assert cfg.author is None
-        assert LiteLLMProvider.from_config(cfg)._resolve_model(cfg.model) == "litellm_proxy/claude-sonnet"
+        assert LiteLLMProvider.from_config(cfg)._resolve_model(cfg.model) == "gpt-4.1-mini"
 
     def test_runtime_selects_the_litellm_provider(self, fake_litellm):
         config = AgentsConfig(
@@ -195,10 +191,8 @@ class TestModelContext:
         fake_litellm.get_model_info = MagicMock(return_value={"max_input_tokens": 64000, "supports_vision": False})
         assert litellm_context_info("deepseek/deepseek-chat") == (64000, ("text",))
 
-    def test_unknown_or_proxied_models_fall_back(self, fake_litellm):
+    def test_unknown_models_fall_back(self, fake_litellm):
         assert litellm_context_info("my-alias") is None
-        fake_litellm.get_model_info = MagicMock(return_value={"max_input_tokens": 200000})
-        assert litellm_context_info("claude-sonnet", base_url="http://localhost:4000") is None
 
     @pytest.mark.asyncio
     async def test_registry_uses_litellm_and_skips_openrouter(self, fake_litellm, tmp_path, monkeypatch):

@@ -187,7 +187,7 @@ def _litellm_info(provider_name: str, provider_cfg: LLMProviderConfig) -> ModelC
     model_id = provider_cfg.model
     if provider_cfg.author and not model_id.startswith(f"{provider_cfg.author}/"):
         model_id = f"{provider_cfg.author}/{model_id}"
-    found = litellm_context_info(model_id, provider_cfg.base_url)
+    found = litellm_context_info(model_id)
     if found is None:
         return None
     context_window, modalities = found
@@ -387,7 +387,7 @@ class ModelContextRegistry:
     ) -> ModelContextInfo:
         model_id = provider_cfg.model
         # LiteLLM carries its own model map; asking OpenRouter about a
-        # "bedrock/..." or proxy-alias model would only guess.
+        # "bedrock/..." model would only guess.
         litellm_info = _litellm_info(provider_name, provider_cfg)
         openrouter_info = None if provider_name == "litellm" else await self._retrieve_openrouter_info(provider_cfg, provider_name)
         if litellm_info is not None:

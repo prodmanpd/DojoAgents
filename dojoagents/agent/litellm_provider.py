@@ -1,8 +1,8 @@
 """LiteLLM SDK provider.
 
 One provider for every backend LiteLLM can route to (Anthropic, Bedrock,
-Vertex AI, Azure, Gemini, Mistral, Ollama, ...) plus LiteLLM Proxy (AI
-gateway) deployments. LiteLLM returns OpenAI-shaped responses and stream
+Vertex AI, Azure, Gemini, Mistral, Ollama, ...) through the LiteLLM SDK.
+LiteLLM returns OpenAI-shaped responses and stream
 chunks, so streaming, reasoning deltas, tool-call assembly and usage
 accounting are inherited from ``OpenAICompatibleProvider``; only the call
 itself, model routing and credential handling differ.
@@ -15,8 +15,6 @@ from typing import Any
 from dojoagents.agent.context_length import ContextLengthExceededError, parse_context_length_error
 from dojoagents.agent.models import LLMResult
 from dojoagents.agent.providers import OpenAICompatibleProvider
-
-PROXY_ROUTE = "litellm_proxy"
 
 
 def _import_litellm() -> Any:
@@ -60,27 +58,16 @@ class LiteLLMProvider(OpenAICompatibleProvider):
 
     def _missing_credentials_result(self) -> LLMResult | None:
         # LiteLLM resolves provider credentials itself (ANTHROPIC_API_KEY,
-        # AWS_*, GOOGLE_APPLICATION_CREDENTIALS, ...), and a proxy started
-        # without a master key accepts unauthenticated requests.
+        # AWS_*, GOOGLE_APPLICATION_CREDENTIALS, ...).
         return None
 
     def _resolve_model(self, model: str) -> str:
         # The config loader splits "anthropic/claude-sonnet-4-5" into
         # author="anthropic" and model="claude-sonnet-4-5"; LiteLLM needs the
         # route back.
-        resolved = model
-        if self.author and not resolved.startswith(f"{self.author}/"):
-            resolved = f"{self.author}/{resolved}"
-        if self.base_url:
-            route = resolved.split("/", 1)[0] if "/" in resolved else ""
-            litellm = _import_litellm()
-            # Behind a LiteLLM Proxy, a bare alias ("claude-sonnet") must be
-            # sent through the proxy route or LiteLLM tries to infer a vendor
-            # from the name. Explicit routes (azure/..., openai/...) keep the
-            # base URL as their api_base.
-            if route not in getattr(litellm, "provider_list", ()):
-                resolved = f"{PROXY_ROUTE}/{resolved}"
-        return resolved
+        if self.author and not model.startswith(f"{self.author}/"):
+            return f"{self.author}/{model}"
+        return model
 
     async def _create_completion(self, create_kwargs: dict[str, Any]) -> Any:
         litellm = _import_litellm()
@@ -89,6 +76,7 @@ class LiteLLMProvider(OpenAICompatibleProvider):
             request.pop("tools", None)
         if self.api_key:
             request["api_key"] = self.api_key
+        # For routes that need an endpoint (azure/..., ollama/..., hosted_vllm/...).
         if self.base_url:
             request["api_base"] = self.base_url
         if self.extra_headers:
@@ -103,14 +91,12 @@ class LiteLLMProvider(OpenAICompatibleProvider):
             raise
 
 
-def litellm_context_info(model: str, base_url: str | None = None) -> tuple[int, tuple[str, ...]] | None:
+def litellm_context_info(model: str) -> tuple[int, tuple[str, ...]] | None:
     """Context window and input modalities from LiteLLM's model map.
 
-    Returns None for names LiteLLM does not know (proxy aliases, custom
-    deployments), so callers keep their existing fallbacks.
+    Returns None for names LiteLLM does not know (custom deployments), so
+    callers keep their existing fallbacks.
     """
-    if base_url:
-        return None
     try:
         litellm = _import_litellm()
         info = litellm.get_model_info(model)
